@@ -9,7 +9,7 @@ Team exercises on Machine Learning applied to insurance — premium simulation, 
 
 ...
 
-...
+Arturo Cortes Islas
 
 Ismael Ruiz Carbajal
 
