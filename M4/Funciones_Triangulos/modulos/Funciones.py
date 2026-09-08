@@ -16,7 +16,8 @@ def cargar_base(ruta_csv: str) -> pd.DataFrame:
 def cambiar_temporalidad(triangulo: pd.DataFrame,
                          columna_accidente: str = "accident_period",
                          columna_desarrollo: str = "development_period",
-                         temporalidad: str = "monthly") -> pd.DataFrame:
+                         temporalidad: str = "monthly",
+                         acumulativo: bool = True) -> pd.DataFrame:
     """
     Cambia la temporalidad de los periodos de accidente y desarrollo.
     temporalidad: 'monthly', 'quarterly', 'yearly'
@@ -40,6 +41,14 @@ def cambiar_temporalidad(triangulo: pd.DataFrame,
         triangulo[columna_desarrollo] = triangulo[columna_desarrollo].astype(int) // 12
     else:
         raise ValueError("Temporalidad no reconocida. Usa: 'monthly', 'quarterly' o 'yearly'")
+
+    if acumulativo:
+        triangulo = (
+        triangulo.sort_values(by=[columna_accidente, columna_desarrollo])
+        .groupby([columna_accidente, columna_desarrollo])["amount"]
+        .last()
+        .reset_index()
+    )
 
     return triangulo
 
