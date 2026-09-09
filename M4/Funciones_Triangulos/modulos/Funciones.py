@@ -13,10 +13,6 @@ def cargar_base(ruta_csv: str) -> pd.DataFrame:
         print(f"Archivo no encontrado en la ruta: {ruta_csv}")
         return None
 
-import pandas as pd
-import numpy as np
-
-
 def convertir_triangulo(
     triangulo: pd.DataFrame,
     concept: str = "Loss Incurred",
