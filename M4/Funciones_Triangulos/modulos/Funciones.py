@@ -19,13 +19,17 @@ def convertir_triangulo(
     index_col: str = "accident_period",
     columns_col: str = "development_period",
     values_col: str = "amount",
+    acumular: bool = False
 ) -> pd.DataFrame:
     """
     Convierte la base del triángulo a formato ancho.
 
     Filtra por concept y genera:
 
+        Si ``acumular=True``, interpreta ``amount`` como incremental y
+    acumula horizontalmente por período de accidente.
 
+    
     development_period: 
 
         accident_period         0      1      2
@@ -66,6 +70,16 @@ def convertir_triangulo(
         .sort_index(axis=0)
         .sort_index(axis=1)
     )
+
+    if not isinstance(acumular, bool):
+        raise TypeError(
+            "acumular debe ser un booleano."
+        )
+
+    if acumular:
+        triangulo_ancho = acumular_triangulo(
+            triangulo_ancho
+        )
 
     triangulo_ancho.columns.name = None
 
@@ -649,6 +663,7 @@ def seleccionar_ldf(
     periodos_std: int | None = None,
     excluir_periodos: list | None = None,
     excluir_celdas: list[tuple] | None = None,
+    acumular: bool = False
 ) -> pd.DataFrame:
     """
     Ejecuta el proceso completo de selección de LDF.
@@ -687,6 +702,10 @@ def seleccionar_ldf(
         Número de períodos utilizados para la selección.
 
         None = todos los períodos disponibles.
+
+    acumular : bool, opcional
+    Si es True, interpreta la base como incremental antes de
+    calcular los factores de desarrollo.
 
     num_std : float, opcional
         Número de desviaciones estándar para identificar
@@ -783,3 +802,722 @@ def seleccionar_ldf(
     )
 
     return resultado
+
+def calcular_ratio(
+    base: pd.DataFrame,
+    columna_numerador: str,
+    columna_denominador: str,
+    columnas_grupo: list[str] | None = None,
+    nombre_ratio: str = "ratio",
+) -> pd.DataFrame:
+    """
+    Calcula ratios entre dos columnas numéricas de una base.
+
+    Si se indican columnas_grupo, agrega el numerador y denominador
+    antes de calcular el ratio.
+
+    Parámetros
+    ----------
+    base : pd.DataFrame
+        Base que contiene el numerador y el denominador.
+
+    columna_numerador : str
+        Columna que se usará como numerador.
+
+    columna_denominador : str
+        Columna que se usará como denominador.
+
+    columnas_grupo : list[str], opcional
+        Columnas con las que se agregará la base antes de calcular
+        el ratio.
+
+    nombre_ratio : str
+        Nombre de la columna de resultado.
+
+    Retorna
+    -------
+    pd.DataFrame
+        Base original, o agregada, con la columna del ratio.
+        Cuando el denominador es cero, el ratio se reporta como NaN.
+    """
+
+    # =========================================================
+    # 1. Validaciones
+    # =========================================================
+
+    if not isinstance(base, pd.DataFrame):
+        raise TypeError("base debe ser un pandas.DataFrame.")
+
+    for columna in [columna_numerador, columna_denominador]:
+        if columna not in base.columns:
+            raise ValueError(
+                f"La columna '{columna}' no existe en la base."
+            )
+
+    if columnas_grupo is not None:
+        if not isinstance(columnas_grupo, list):
+            raise TypeError(
+                "columnas_grupo debe ser una lista o None."
+            )
+
+        for columna in columnas_grupo:
+            if columna not in base.columns:
+                raise ValueError(
+                    f"La columna '{columna}' no existe en la base."
+                )
+
+    if not isinstance(nombre_ratio, str) or not nombre_ratio:
+        raise ValueError(
+            "nombre_ratio debe ser un texto no vacío."
+        )
+
+    # =========================================================
+    # 2. Agregar, si aplica, y calcular ratio
+    # =========================================================
+
+    if columnas_grupo is None:
+        resultado = base.copy()
+    else:
+        resultado = (
+            base.groupby(
+                columnas_grupo,
+                dropna=False,
+                as_index=False,
+            )[[columna_numerador, columna_denominador]]
+            .sum()
+        )
+
+    numerador = pd.to_numeric(
+        resultado[columna_numerador],
+        errors="raise",
+    )
+    denominador = pd.to_numeric(
+        resultado[columna_denominador],
+        errors="raise",
+    )
+
+    resultado[nombre_ratio] = numerador.div(
+        denominador.replace(0, np.nan)
+    )
+
+    return resultado
+
+def cortar_base_fecha_valuacion(
+    base: pd.DataFrame,
+    fecha_valuacion: str | pd.Timestamp,
+    index_col: str = "accident_period",
+    columns_col: str = "development_period",
+    unidad_desarrollo: str = "meses",
+) -> pd.DataFrame:
+    """
+    Corta una base de triángulo a una fecha de valuación.
+
+    El período de accidente se interpreta como fecha de origen y el
+    período de desarrollo como meses, días o años desde esa fecha.
+    Sólo conserva observaciones cuya fecha de desarrollo ya ocurrió.
+
+    Parámetros
+    ----------
+    base : pd.DataFrame
+        Base de triángulo en formato largo.
+
+    fecha_valuacion : str o pd.Timestamp
+        Fecha máxima de valuación a conservar.
+
+    index_col : str
+        Columna que contiene la fecha de origen.
+
+    columns_col : str
+        Columna que contiene el período de desarrollo.
+
+    unidad_desarrollo : str
+        Unidad del período de desarrollo: "meses", "dias" o "años".
+
+    Retorna
+    -------
+    pd.DataFrame
+        Copia de la base limitada a la fecha de valuación.
+    """
+
+    # =========================================================
+    # 1. Validaciones
+    # =========================================================
+
+    if not isinstance(base, pd.DataFrame):
+        raise TypeError("base debe ser un pandas.DataFrame.")
+
+    for columna in [index_col, columns_col]:
+        if columna not in base.columns:
+            raise ValueError(
+                f"La columna '{columna}' no existe en la base."
+            )
+
+    unidades_validas = {
+        "meses": "months",
+        "dias": "days",
+        "años": "years",
+    }
+
+    if unidad_desarrollo not in unidades_validas:
+        raise ValueError(
+            "unidad_desarrollo debe ser 'meses', 'dias' o 'años'."
+        )
+
+    fecha_valuacion = pd.to_datetime(
+        fecha_valuacion,
+        errors="raise",
+    )
+
+    if pd.isna(fecha_valuacion):
+        raise ValueError(
+            "fecha_valuacion no puede ser nula."
+        )
+
+    # =========================================================
+    # 2. Calcular fecha de desarrollo
+    # =========================================================
+
+    resultado = base.copy()
+    fechas_origen = pd.to_datetime(
+        resultado[index_col],
+        errors="raise",
+    )
+    periodos = pd.to_numeric(
+        resultado[columns_col],
+        errors="raise",
+    )
+
+    if periodos.isna().any():
+        raise ValueError(
+            "columns_col no puede contener valores nulos."
+        )
+
+    if not np.all(np.equal(periodos, np.floor(periodos))):
+        raise ValueError(
+            "Los períodos de desarrollo deben ser enteros."
+        )
+
+    nombre_unidad = unidades_validas[unidad_desarrollo]
+    fechas_desarrollo = pd.Series(
+        [
+            fecha + pd.DateOffset(**{nombre_unidad: int(periodo)})
+            for fecha, periodo in zip(fechas_origen, periodos)
+        ],
+        index=resultado.index,
+    )
+
+    # =========================================================
+    # 3. Aplicar fecha de valuación
+    # =========================================================
+
+    conservar = (
+        (fechas_origen <= fecha_valuacion)
+        & (fechas_desarrollo <= fecha_valuacion)
+    )
+
+    return resultado.loc[conservar].copy()
+
+def _convertir_a_serie_bf(
+    valor: float | int | dict | pd.Series,
+    indice: pd.Index,
+    nombre: str,
+) -> pd.Series:
+    """Convierte un insumo escalar o por período en una serie."""
+
+    if np.isscalar(valor):
+        serie = pd.Series(valor, index=indice, dtype=float)
+    elif isinstance(valor, dict):
+        serie = pd.Series(valor, dtype=float).reindex(indice)
+    elif isinstance(valor, pd.Series):
+        serie = valor.astype(float).reindex(indice)
+    else:
+        raise TypeError(
+            f"{nombre} debe ser escalar, dict o pandas.Series."
+        )
+
+    if serie.isna().any():
+        raise ValueError(
+            f"{nombre} debe tener un valor para cada período "
+            "de accidente."
+        )
+
+    if (serie < 0).any():
+        raise ValueError(
+            f"{nombre} no puede contener valores negativos."
+        )
+
+    return serie
+
+def calcular_bornhuetter_ferguson(
+    triangulo: pd.DataFrame,
+    ldf_seleccionados: pd.Series | pd.DataFrame,
+    primas: float | int | dict | pd.Series,
+    ratio_perdida_esperada: float | int | dict | pd.Series,
+    factor_cola: float = 1.0,
+    validar_monotonia: bool = True,
+    permitir_cdf_menor_uno: bool = False,
+) -> pd.DataFrame:
+    """
+    Calcula ultimate y reserva mediante Bornhuetter-Ferguson (B-F).
+
+    B-F combina el valor acumulado observado con la porción no
+    desarrollada de la pérdida esperada:
+
+        CDF_j = LDF_j x ... x LDF_ultimo x factor_cola
+        Ultimate_BF = Observado_j
+                      + (Prima x Ratio esperado) x (1 - 1 / CDF_j)
+
+    El CDF se construye desde los LDF seleccionados para la edad
+    observada de cada período de accidente.
+
+    Parámetros
+    ----------
+    triangulo : pd.DataFrame
+        Triángulo acumulado en formato ancho.
+
+    ldf_seleccionados : pd.Series o pd.DataFrame
+        LDF de calcular_seleccion_ldf o seleccionar_ldf. Debe
+        contener una transición por cada par de columnas consecutivas.
+
+    primas : escalar, dict o pd.Series
+        Prima ganada, exposición monetizada o base equivalente por
+        período de accidente.
+
+    ratio_perdida_esperada : escalar, dict o pd.Series
+        Expected Loss Ratio (ELR) por período de accidente.
+
+    factor_cola : float, opcional
+        Factor desde el último desarrollo explícito hasta ultimate.
+
+    validar_monotonia : bool, opcional
+        Si es True, exige que el triángulo no disminuya entre
+        desarrollos. Puede desactivarse para escenarios simulados.
+
+    permitir_cdf_menor_uno : bool, opcional
+        Si es True, permite CDF menores que 1 y resultados como
+        reservas negativas para estudiar escenarios no normales.
+
+    Retorna
+    -------
+    pd.DataFrame
+        Resultado con observado, CDF a último, ultimate y reserva B-F.
+    """
+
+    # =========================================================
+    # 1. Validaciones
+    # =========================================================
+
+    if not isinstance(triangulo, pd.DataFrame):
+        raise TypeError("triangulo debe ser un pandas.DataFrame.")
+
+    if triangulo.empty or triangulo.shape[1] < 2:
+        raise ValueError(
+            "triangulo debe tener al menos dos períodos de desarrollo."
+        )
+
+    if not isinstance(factor_cola, (int, float)):
+        raise TypeError("factor_cola debe ser numérico.")
+
+    if factor_cola <= 0:
+        raise ValueError("factor_cola debe ser mayor que 0.")
+
+    if not isinstance(validar_monotonia, bool):
+        raise TypeError("validar_monotonia debe ser un booleano.")
+
+    if not isinstance(permitir_cdf_menor_uno, bool):
+        raise TypeError(
+            "permitir_cdf_menor_uno debe ser un booleano."
+        )
+
+    if isinstance(ldf_seleccionados, pd.DataFrame):
+        if ldf_seleccionados.shape[1] != 1:
+            raise ValueError(
+                "ldf_seleccionados debe tener una sola columna."
+            )
+
+        ldf = ldf_seleccionados.iloc[:, 0].copy()
+    elif isinstance(ldf_seleccionados, pd.Series):
+        ldf = ldf_seleccionados.copy()
+    else:
+        raise TypeError(
+            "ldf_seleccionados debe ser un pandas.Series o DataFrame."
+        )
+
+    triangulo = validar_triangulo_acumulado(
+        triangulo,
+        exigir_no_decreciente=validar_monotonia,
+    )
+
+    if len(ldf) != triangulo.shape[1] - 1:
+        raise ValueError(
+            "ldf_seleccionados debe tener un LDF por cada transición "
+            "del triángulo."
+        )
+
+    ldf = pd.to_numeric(ldf, errors="raise")
+
+    if ldf.isna().any() or (ldf <= 0).any():
+        raise ValueError(
+            "Los LDF seleccionados deben ser valores positivos y no nulos."
+        )
+
+    primas_serie = _convertir_a_serie_bf(
+        valor=primas,
+        indice=triangulo.index,
+        nombre="primas",
+    )
+    elr_serie = _convertir_a_serie_bf(
+        valor=ratio_perdida_esperada,
+        indice=triangulo.index,
+        nombre="ratio_perdida_esperada",
+    )
+
+    # =========================================================
+    # 2. Construir CDF a último a partir de los LDF
+    # =========================================================
+
+    cdf_por_edad = []
+
+    for posicion in range(triangulo.shape[1]):
+        cdf = ldf.iloc[posicion:].prod() * factor_cola
+        cdf_por_edad.append(cdf)
+
+    if not permitir_cdf_menor_uno and any(
+        cdf < 1 for cdf in cdf_por_edad
+    ):
+        raise ValueError(
+            "Los LDF y factor_cola deben producir CDF a último "
+            "mayores o iguales a 1."
+        )
+
+    # =========================================================
+    # 3. Calcular B-F por período de accidente
+    # =========================================================
+
+    resultado = []
+
+    for periodo, fila in triangulo.iterrows():
+        observados = fila.dropna()
+
+        if observados.empty:
+            raise ValueError(
+                f"El período '{periodo}' no tiene valores observados."
+            )
+
+        posicion = triangulo.columns.get_loc(observados.index[-1])
+        observado = observados.iloc[-1]
+        cdf = cdf_por_edad[posicion]
+        porcentaje_no_desarrollado = 1 - (1 / cdf)
+        ultimate_esperado = (
+            primas_serie.loc[periodo] * elr_serie.loc[periodo]
+        )
+        ultimate_bf = (
+            observado
+            + ultimate_esperado * porcentaje_no_desarrollado
+        )
+
+        resultado.append(
+            {
+                "periodo_accidente": periodo,
+                "valor_observado": observado,
+                "edad_desarrollo": observados.index[-1],
+                "cdf_a_ultimo": cdf,
+                "porcentaje_no_desarrollado": porcentaje_no_desarrollado,
+                "prima": primas_serie.loc[periodo],
+                "ratio_perdida_esperada": elr_serie.loc[periodo],
+                "ultimate_esperado": ultimate_esperado,
+                "ultimate_bf": ultimate_bf,
+                "reserva_bf": ultimate_bf - observado,
+            }
+        )
+
+    return pd.DataFrame(resultado).set_index("periodo_accidente")
+
+def validar_triangulo_acumulado(
+    triangulo: pd.DataFrame,
+    exigir_no_decreciente: bool = True,
+) -> pd.DataFrame:
+    """
+    Valida y ordena un triángulo acumulado en formato ancho.
+
+    Por defecto, exige valores no decrecientes dentro de cada período
+    de accidente. Esta condición se puede desactivar para estudiar
+    escenarios acumulados con correcciones negativas simuladas.
+
+    Parámetros
+    ----------
+    triangulo : pd.DataFrame
+        Triángulo ancho a validar.
+
+    exigir_no_decreciente : bool, opcional
+        Si es True, rechaza disminuciones entre desarrollos.
+
+    Retorna
+    -------
+    pd.DataFrame
+        Copia numérica y ordenada del triángulo.
+    """
+
+    if not isinstance(triangulo, pd.DataFrame):
+        raise TypeError(
+            "triangulo debe ser un pandas.DataFrame."
+        )
+
+    if triangulo.empty:
+        raise ValueError(
+            "triangulo no puede estar vacío."
+        )
+
+    if not isinstance(exigir_no_decreciente, bool):
+        raise TypeError(
+            "exigir_no_decreciente debe ser un booleano."
+        )
+
+    resultado = triangulo.apply(
+        pd.to_numeric,
+        errors="raise",
+    )
+
+    resultado = (
+        resultado.sort_index()
+        .sort_index(axis=1)
+    )
+
+    if exigir_no_decreciente and (
+        resultado.diff(axis=1) < 0
+    ).any().any():
+        raise ValueError(
+            "triangulo debe contener valores acumulados no "
+            "decrecientes. Si la base es incremental, usa "
+            "acumular_triangulo antes de calcular reservas."
+        )
+
+    return resultado
+
+
+def acumular_triangulo(
+    triangulo: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Convierte un triángulo incremental en acumulado.
+
+    La acumulación se realiza horizontalmente por cada período de
+    accidente, conservando la forma triangular y los valores NaN.
+
+    Parámetros
+    ----------
+    triangulo : pd.DataFrame
+        Triángulo incremental en formato ancho.
+
+    Retorna
+    -------
+    pd.DataFrame
+        Triángulo acumulado.
+    """
+
+    if not isinstance(triangulo, pd.DataFrame):
+        raise TypeError(
+            "triangulo debe ser un pandas.DataFrame."
+        )
+
+    if triangulo.empty:
+        raise ValueError(
+            "triangulo no puede estar vacío."
+        )
+
+    resultado = triangulo.apply(
+        pd.to_numeric,
+        errors="raise",
+    )
+
+    resultado = (
+        resultado.sort_index()
+        .sort_index(axis=1)
+    )
+
+    for periodo, fila in resultado.iterrows():
+        observados = fila.notna().to_numpy()
+
+        if observados.any():
+            ultima_posicion = np.flatnonzero(observados)[-1]
+
+            if not observados[:ultima_posicion + 1].all():
+                raise ValueError(
+                    f"El período '{periodo}' tiene huecos entre "
+                    "desarrollos observados."
+                )
+
+    return resultado.cumsum(axis=1)
+
+
+def _normalizar_ldf_reservas(
+    ldf_seleccionados: pd.Series | pd.DataFrame,
+    num_transiciones: int,
+) -> pd.Series:
+    """Valida y normaliza LDF para métodos de reservas."""
+
+    if isinstance(ldf_seleccionados, pd.DataFrame):
+        if ldf_seleccionados.shape[1] != 1:
+            raise ValueError(
+                "ldf_seleccionados debe tener una sola columna."
+            )
+
+        ldf = ldf_seleccionados.iloc[:, 0].copy()
+    elif isinstance(ldf_seleccionados, pd.Series):
+        ldf = ldf_seleccionados.copy()
+    else:
+        raise TypeError(
+            "ldf_seleccionados debe ser un pandas.Series o DataFrame."
+        )
+
+    if len(ldf) != num_transiciones:
+        raise ValueError(
+            "ldf_seleccionados debe tener un LDF por cada transición "
+            "del triángulo."
+        )
+
+    ldf = pd.to_numeric(
+        ldf,
+        errors="raise",
+    )
+
+    if ldf.isna().any() or (ldf <= 0).any():
+        raise ValueError(
+            "Los LDF seleccionados deben ser valores positivos y no nulos."
+        )
+
+    return ldf
+
+
+def calcular_chain_ladder(
+    triangulo: pd.DataFrame,
+    ldf_seleccionados: pd.Series | pd.DataFrame,
+    factor_cola: float = 1.0,
+    validar_monotonia: bool = True,
+    permitir_cdf_menor_uno: bool = False,
+) -> pd.DataFrame:
+    """
+    Calcula ultimate y reserva mediante Chain Ladder.
+
+    Para cada período de accidente, proyecta el último valor
+    acumulado observado hasta último usando los LDF seleccionados:
+
+        CDF_j = LDF_j x ... x LDF_ultimo x factor_cola
+        Ultimate_CL = Observado_j x CDF_j
+        Reserva_CL = Ultimate_CL - Observado_j
+
+    Parámetros
+    ----------
+    triangulo : pd.DataFrame
+        Triángulo acumulado en formato ancho.
+
+    ldf_seleccionados : pd.Series o pd.DataFrame
+        LDF de calcular_seleccion_ldf o seleccionar_ldf.
+
+    factor_cola : float, opcional
+        Factor desde el último desarrollo explícito hasta ultimate.
+
+    validar_monotonia : bool, opcional
+        Si es True, exige que el triángulo no disminuya entre
+        desarrollos.
+
+    permitir_cdf_menor_uno : bool, opcional
+        Si es True, permite CDF menores que 1 para análisis de
+        escenarios no normales.
+
+    Retorna
+    -------
+    pd.DataFrame
+        Resultado por período con observado, CDF, ultimate y reserva.
+    """
+
+    # =========================================================
+    # 1. Validaciones
+    # =========================================================
+
+    if not isinstance(validar_monotonia, bool):
+        raise TypeError("validar_monotonia debe ser un booleano.")
+
+    if not isinstance(permitir_cdf_menor_uno, bool):
+        raise TypeError(
+            "permitir_cdf_menor_uno debe ser un booleano."
+        )
+
+    triangulo = validar_triangulo_acumulado(
+        triangulo,
+        exigir_no_decreciente=validar_monotonia,
+    )
+
+    if triangulo.shape[1] < 2:
+        raise ValueError(
+            "triangulo debe tener al menos dos períodos de desarrollo."
+        )
+
+    if not isinstance(factor_cola, (int, float)):
+        raise TypeError(
+            "factor_cola debe ser numérico."
+        )
+
+    if factor_cola <= 0:
+        raise ValueError(
+            "factor_cola debe ser mayor que 0."
+        )
+
+    ldf = _normalizar_ldf_reservas(
+        ldf_seleccionados=ldf_seleccionados,
+        num_transiciones=triangulo.shape[1] - 1,
+    )
+
+    # =========================================================
+    # 2. Construir CDF a último
+    # =========================================================
+
+    cdf_por_edad = []
+
+    for posicion in range(triangulo.shape[1]):
+        cdf = ldf.iloc[posicion:].prod() * factor_cola
+        cdf_por_edad.append(cdf)
+
+    if not permitir_cdf_menor_uno and any(
+        cdf < 1 for cdf in cdf_por_edad
+    ):
+        raise ValueError(
+            "Los LDF y factor_cola deben producir CDF a último "
+            "mayores o iguales a 1."
+        )
+
+    # =========================================================
+    # 3. Calcular Chain Ladder
+    # =========================================================
+
+    resultado = []
+
+    for periodo, fila in triangulo.iterrows():
+        observados = fila.dropna()
+
+        if observados.empty:
+            raise ValueError(
+                f"El período '{periodo}' no tiene valores observados."
+            )
+
+        posicion = triangulo.columns.get_loc(
+            observados.index[-1]
+        )
+        observado = observados.iloc[-1]
+        cdf = cdf_por_edad[posicion]
+        ultimate = observado * cdf
+
+        resultado.append(
+            {
+                "periodo_accidente": periodo,
+                "valor_observado": observado,
+                "edad_desarrollo": observados.index[-1],
+                "cdf_a_ultimo": cdf,
+                "ultimate_chain_ladder": ultimate,
+                "reserva_chain_ladder": ultimate - observado,
+            }
+        )
+
+    return pd.DataFrame(resultado).set_index(
+        "periodo_accidente"
+    )
